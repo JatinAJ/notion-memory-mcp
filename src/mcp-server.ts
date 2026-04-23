@@ -10,7 +10,7 @@ import { query } from './db';
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-async function getEmbedding(text: string): Promise<number[]> {
+export async function getEmbedding(text: string): Promise<number[]> {
   const res = await openai.embeddings.create({
     model: process.env.EMBEDDING_MODEL || 'text-embedding-3-small',
     input: text,
@@ -81,7 +81,6 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     params.push(limit);
 
     const result = await query(sql, params);
-
     const chunks = result.rows.map((row: any) => ({
       page_title: row.page_title,
       chunk_index: row.chunk_index,
@@ -97,28 +96,51 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   throw new Error(`Unknown tool: ${name}`);
 });
 
-// HTTP health-check server so Render web service stays alive
+// HTTP server: health check + /context endpoint for gateway
 function startHealthServer() {
   const port = parseInt(process.env.PORT || '3000');
-  const httpServer = http.createServer((req, res) => {
+  const httpServer = http.createServer(async (req, res) => {
     if (req.url === '/health' || req.url === '/') {
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ status: 'ok', service: 'notion-memory-mcp' }));
+    } else if (req.url === '/context' && req.method === 'POST') {
+      // Gateway calls this to get memory context
+      let body = '';
+      req.on('data', (chunk) => { body += chunk; });
+      req.on('end', async () => {
+        try {
+          const { query: q, topK = 5 } = JSON.parse(body) as { query: string; topK?: number };
+          const embedding = await getEmbedding(q);
+          const result = await query(
+            `SELECT page_title, content,
+                    1 - (embedding <=> $1::vector) AS similarity
+             FROM memory_chunks
+             ORDER BY embedding <=> $1::vector
+             LIMIT $2`,
+            [JSON.stringify(embedding), topK]
+          );
+          const contextText = result.rows
+            .map((r: any) => `[${r.page_title}]\n${r.content}`)
+            .join('\n\n---\n\n');
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ context: contextText, chunks: result.rows.length }));
+        } catch (err) {
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: String(err) }));
+        }
+      });
     } else {
       res.writeHead(404);
       res.end('Not found');
     }
   });
   httpServer.listen(port, () => {
-    console.error(`Health server listening on port ${port}`);
+    console.error(`MCP HTTP server listening on port ${port}`);
   });
 }
 
 async function main() {
-  // Start HTTP health check (required for Render web service)
   startHealthServer();
-
-  // Start MCP server on stdio
   const transport = new StdioServerTransport();
   await server.connect(transport);
   console.error('Notion Memory MCP server running on stdio');
