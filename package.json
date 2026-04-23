@@ -7,16 +7,20 @@
     "build": "tsc",
     "start": "node dist/mcp-server.js",
     "index": "node dist/indexer.js",
+    "gateway": "node dist/gateway.js",
     "dev": "ts-node src/mcp-server.ts",
-    "dev:index": "ts-node src/indexer.ts"
+    "dev:index": "ts-node src/indexer.ts",
+    "dev:gateway": "ts-node src/gateway.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0",
     "@notionhq/client": "^2.2.15",
+    "express": "^4.21.0",
     "openai": "^4.52.0",
     "pg": "^8.12.0"
   },
   "devDependencies": {
+    "@types/express": "^4.17.21",
     "@types/node": "^20.0.0",
     "@types/pg": "^8.11.6",
     "ts-node": "^10.9.2",
