@@ -5,13 +5,14 @@ import {
   ListToolsRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js';
 import OpenAI from 'openai';
+import http from 'http';
 import { query } from './db';
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 async function getEmbedding(text: string): Promise<number[]> {
   const res = await openai.embeddings.create({
-    model: 'text-embedding-3-small',
+    model: process.env.EMBEDDING_MODEL || 'text-embedding-3-small',
     input: text,
   });
   return res.data[0].embedding;
@@ -27,41 +28,25 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     {
       name: 'memory.get_context',
       description:
-        'Retrieve relevant memory chunks from Notion based on a query. Use this to recall facts, notes, or context stored in Notion.',
+        'Retrieve relevant memory chunks from Notion based on a query.',
       inputSchema: {
         type: 'object',
         properties: {
-          query: {
-            type: 'string',
-            description: 'The query or topic to search for in Notion memory',
-          },
-          limit: {
-            type: 'number',
-            description: 'Max number of chunks to return (default 5)',
-          },
+          query: { type: 'string', description: 'The query to search for' },
+          limit: { type: 'number', description: 'Max chunks to return (default 5)' },
         },
         required: ['query'],
       },
     },
     {
       name: 'memory.search',
-      description:
-        'Search Notion memory for specific terms or keywords using semantic similarity.',
+      description: 'Search Notion memory using semantic similarity.',
       inputSchema: {
         type: 'object',
         properties: {
-          query: {
-            type: 'string',
-            description: 'Search query string',
-          },
-          limit: {
-            type: 'number',
-            description: 'Max results to return (default 10)',
-          },
-          page_title_filter: {
-            type: 'string',
-            description: 'Optional: filter results to a specific Notion page title',
-          },
+          query: { type: 'string', description: 'Search query string' },
+          limit: { type: 'number', description: 'Max results (default 10)' },
+          page_title_filter: { type: 'string', description: 'Filter by page title' },
         },
         required: ['query'],
       },
@@ -74,7 +59,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
   if (name === 'memory.get_context' || name === 'memory.search') {
     const userQuery = (args as any).query as string;
-    const limit = (args as any).limit ?? (name === 'memory.search' ? 10 : 5);
+    const topK = parseInt(process.env.TOP_K || '5');
+    const limit = (args as any).limit ?? (name === 'memory.search' ? topK * 2 : topK);
     const pageTitleFilter = (args as any).page_title_filter as string | undefined;
 
     const embedding = await getEmbedding(userQuery);
@@ -104,19 +90,35 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     }));
 
     return {
-      content: [
-        {
-          type: 'text',
-          text: JSON.stringify(chunks, null, 2),
-        },
-      ],
+      content: [{ type: 'text', text: JSON.stringify(chunks, null, 2) }],
     };
   }
 
   throw new Error(`Unknown tool: ${name}`);
 });
 
+// HTTP health-check server so Render web service stays alive
+function startHealthServer() {
+  const port = parseInt(process.env.PORT || '3000');
+  const httpServer = http.createServer((req, res) => {
+    if (req.url === '/health' || req.url === '/') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ status: 'ok', service: 'notion-memory-mcp' }));
+    } else {
+      res.writeHead(404);
+      res.end('Not found');
+    }
+  });
+  httpServer.listen(port, () => {
+    console.error(`Health server listening on port ${port}`);
+  });
+}
+
 async function main() {
+  // Start HTTP health check (required for Render web service)
+  startHealthServer();
+
+  // Start MCP server on stdio
   const transport = new StdioServerTransport();
   await server.connect(transport);
   console.error('Notion Memory MCP server running on stdio');
