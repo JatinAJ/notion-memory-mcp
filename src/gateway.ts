@@ -1,13 +1,20 @@
 import express, { Request, Response } from 'express';
 import OpenAI from 'openai';
 import { query } from './db';
-import { getEmbedding } from './mcp-server';
 
 const app = express();
 app.use(express.json());
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 const MCP_URL = process.env.MCP_URL || 'https://notion-memory-mcp.onrender.com';
+
+async function getEmbedding(text: string): Promise<number[]> {
+  const res = await openai.embeddings.create({
+    model: process.env.EMBEDDING_MODEL || 'text-embedding-3-small',
+    input: text,
+  });
+  return res.data[0].embedding;
+}
 
 // Health check
 app.get('/health', (_req: Request, res: Response) => {
@@ -25,7 +32,7 @@ app.post('/chat', async (req: Request, res: Response) => {
     }
 
     // 1) Fetch memory context from MCP server
-    let context = '';
+    let memoryContext = '';
     try {
       const mcpRes = await fetch(`${MCP_URL}/context`, {
         method: 'POST',
@@ -34,20 +41,15 @@ app.post('/chat', async (req: Request, res: Response) => {
       });
       if (mcpRes.ok) {
         const data = await mcpRes.json() as { context?: string };
-        context = data.context || '';
+        memoryContext = data.context || '';
       }
-    } catch {
-      // MCP unavailable — continue without memory
+    } catch (e) {
+      console.error('Failed to fetch memory context:', e);
     }
 
-    // 2) Build messages with injected context
-    const systemPrompt = context
-      ? `You are a helpful assistant with access to the user's Notion memory.
-
-Relevant context from memory:
-${context}
-
-Use this context to inform your response when relevant.`
+    // 2) Build system prompt with injected memory
+    const systemPrompt = memoryContext
+      ? `You have access to the following relevant memory context from Notion:\n\n${memoryContext}\n\nUse this context to inform your response.`
       : 'You are a helpful assistant.';
 
     // 3) Call OpenAI
@@ -59,40 +61,15 @@ Use this context to inform your response when relevant.`
       ],
     });
 
-    const reply = completion.choices[0]?.message?.content || '';
-    res.json({ reply, context_used: !!context });
+    const reply = completion.choices[0].message.content;
+    res.json({ reply, memoryUsed: !!memoryContext });
   } catch (err) {
-    console.error('Gateway error:', err);
+    console.error('Chat error:', err);
     res.status(500).json({ error: 'Internal server error' });
   }
 });
 
-// Direct vector search endpoint (bypasses OpenAI — returns raw matches)
-// POST /search  { query: string, topK?: number }
-app.post('/search', async (req: Request, res: Response) => {
-  try {
-    const { query: q, topK = 5 } = req.body as { query: string; topK?: number };
-    if (!q) {
-      res.status(400).json({ error: 'query is required' });
-      return;
-    }
-    const embedding = await getEmbedding(q);
-    const result = await query(
-      `SELECT content, metadata,
-              1 - (embedding <=> $1::vector) AS similarity
-       FROM memory_chunks
-       ORDER BY embedding <=> $1::vector
-       LIMIT $2`,
-      [JSON.stringify(embedding), topK]
-    );
-    res.json({ results: result.rows });
-  } catch (err) {
-    console.error('Search error:', err);
-    res.status(500).json({ error: 'Internal server error' });
-  }
-});
-
-const PORT = parseInt(process.env.GATEWAY_PORT || process.env.PORT || '4000', 10);
+const PORT = parseInt(process.env.PORT || '4000', 10);
 app.listen(PORT, () => {
   console.log(`Gateway listening on port ${PORT}`);
 });
